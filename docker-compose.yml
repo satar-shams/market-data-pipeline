@@ -1,0 +1,43 @@
+# docker-compose.yml
+services:
+
+  postgres:
+    image: postgres:16-alpine          # alpine = smaller image, same functionality
+    container_name: market_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+      # host_port:container_port
+      # your code connects to localhost:5432
+      # Docker forwards it to postgres container's 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # persistent storage — data survives container restart
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql  # auto-runs on first start
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: market_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@market.local
+      PGADMIN_DEFAULT_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5050:80"                      # pgAdmin UI at http://localhost:5050
+    depends_on:
+      postgres:
+        condition: service_healthy     # waits for postgres healthcheck to pass
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  postgres_data:
+  pgadmin_data:
