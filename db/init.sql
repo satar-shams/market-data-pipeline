@@ -48,6 +48,30 @@ CREATE INDEX IF NOT EXISTS idx_ohlcv_timestamp
 CREATE INDEX IF NOT EXISTS idx_ohlcv_ticker_timestamp
     ON market_data.ohlcv (ticker, timestamp DESC);
 
+-- ── Features table ──────────────────────────────────────────────────────────
+-- Stores engineered features derived from ohlcv. Kept separate from raw data
+-- so the raw layer stays immutable — features can be recomputed/versioned
+-- independently without touching source data.
+CREATE TABLE IF NOT EXISTS market_data.ohlcv_features (
+    id              BIGSERIAL,
+    ticker          VARCHAR(10)     NOT NULL,
+    timestamp       DATE            NOT NULL,
+    daily_return    NUMERIC(10, 6),
+    sma_20          NUMERIC(12, 4),
+    sma_50          NUMERIC(12, 4),
+    volatility_20d  NUMERIC(10, 6),
+    volume_ma_20    NUMERIC(16, 4),
+    rsi_14          NUMERIC(6, 3),
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (ticker, timestamp),
+    FOREIGN KEY (ticker, timestamp)
+        REFERENCES market_data.ohlcv (ticker, timestamp)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ohlcv_features_timestamp
+    ON market_data.ohlcv_features (timestamp DESC);
+
 -- ── Pipeline metadata table ───────────────────────────────────────────────────
 -- Tracks every pipeline run: when it ran, what it pulled, success/failure.
 -- Essential for idempotent loads and debugging.

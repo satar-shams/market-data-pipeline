@@ -86,6 +86,77 @@ class PostgresLoader:
             rows_after,
         )
         return rows_inserted
+    
+    def load_features(self, df: pd.DataFrame) -> int:
+        """
+        Upserts engineered features into market_data.ohlcv_features.
+        Same idempotency pattern as load() — safe to re-run.
+
+        Args:
+            df: DataFrame with columns
+                [ticker, timestamp, daily_return, sma_20, sma_50,
+                 volatility_20d, volume_ma_20, rsi_14]
+
+        Returns:
+            Number of rows actually inserted.
+        """
+        if df.empty:
+            logger.warning("Empty DataFrame passed to load_features — nothing to load.")
+            return 0
+
+        required = {
+            "ticker", "timestamp", "daily_return", "sma_20",
+            "sma_50", "volatility_20d", "volume_ma_20", "rsi_14"
+        }
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing feature columns before load: {missing}")
+
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.date
+        df = df.drop_duplicates(subset=["ticker", "timestamp"])
+
+        rows_before = self._count_rows(table="ohlcv_features")
+
+        try:
+            with self.engine.begin() as conn:
+                for _, row in df.iterrows():
+                    conn.execute(
+                        text("""
+                            INSERT INTO market_data.ohlcv_features
+                                (ticker, timestamp, daily_return, sma_20, sma_50,
+                                 volatility_20d, volume_ma_20, rsi_14)
+                            VALUES
+                                (:ticker, :timestamp, :daily_return, :sma_20, :sma_50,
+                                 :volatility_20d, :volume_ma_20, :rsi_14)
+                            ON CONFLICT (ticker, timestamp) DO NOTHING
+                        """),
+                        {
+                            "ticker":         row["ticker"],
+                            "timestamp":      row["timestamp"],
+                            "daily_return":   row["daily_return"],
+                            "sma_20":         row["sma_20"],
+                            "sma_50":         row["sma_50"],
+                            "volatility_20d": row["volatility_20d"],
+                            "volume_ma_20":   row["volume_ma_20"],
+                            "rsi_14":         row["rsi_14"],
+                        }
+                    )
+
+        except SQLAlchemyError as e:
+            logger.error("Database error during feature load: %s", str(e), exc_info=True)
+            raise
+
+        rows_after = self._count_rows(table="ohlcv_features")
+        rows_inserted = rows_after - rows_before
+
+        logger.info(
+            "Feature load complete | rows_inserted=%d | rows_skipped=%d | total_in_db=%d",
+            rows_inserted,
+            len(df) - rows_inserted,
+            rows_after,
+        )
+        return rows_inserted
 
     def record_pipeline_run(
         self,
@@ -140,12 +211,11 @@ class PostgresLoader:
             logger.error("Missing columns before load: %s", missing)
             return False
         return True
-
-    def _count_rows(self) -> int:
+    
+    def _count_rows(self, table: str = "ohlcv") -> int:
         with self.engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM market_data.ohlcv"))
+            result = conn.execute(text(f"SELECT COUNT(*) FROM market_data.{table}"))
             return result.scalar()
-
 
 # ── Entrypoint for manual runs ────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -156,18 +226,30 @@ if __name__ == "__main__":
     )
 
     from etl.extract.yfinance_extractor import YFinanceExtractor
+    from etl.transform.ohlcv_transformer import OHLCVTransformer
 
     start = time.time()
     status = "success"
     error_msg = None
-    df = pd.DataFrame()
+    raw_df = pd.DataFrame()
+    rows_loaded_raw = 0
+    rows_loaded_features = 0
 
     try:
+        # ── Extract ──────────────────────────────────────────────────────────
         extractor = YFinanceExtractor()
-        df = extractor.extract_all()
+        raw_df = extractor.extract_all()
 
+        # ── Load raw OHLCV ───────────────────────────────────────────────────
         loader = PostgresLoader()
-        rows_loaded = loader.load(df)
+        rows_loaded_raw = loader.load(raw_df)
+
+        # ── Transform ────────────────────────────────────────────────────────
+        transformer = OHLCVTransformer()
+        features_df = transformer.transform(raw_df)
+
+        # ── Load features ────────────────────────────────────────────────────
+        rows_loaded_features = loader.load_features(features_df)
 
     except Exception as e:
         status = "failed"
@@ -179,8 +261,8 @@ if __name__ == "__main__":
         duration = time.time() - start
         PostgresLoader().record_pipeline_run(
             tickers=settings.tickers_list,
-            rows_extracted=len(df),
-            rows_loaded=rows_loaded if status == "success" else 0,
+            rows_extracted=len(raw_df),
+            rows_loaded=rows_loaded_raw + rows_loaded_features,
             status=status,
             duration_sec=duration,
             error_message=error_msg,
