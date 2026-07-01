@@ -25,3 +25,15 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Airflow runtime artifacts (machine-specific, regenerated on init)
+.venv-airflow/
+airflow/airflow.db
+airflow/airflow.cfg
+airflow/airflow-webserver.pid
+airflow/webserver_config.py
+airflow/logs/
+airflow/*.pid
+
+# Temp pipeline data
+/tmp/market_data_pipeline/

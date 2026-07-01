@@ -4,51 +4,59 @@ A production-grade ETL pipeline for ingesting, transforming, and storing equity 
 
 ## Overview
 
-This pipeline extracts daily OHLCV (Open/High/Low/Close/Volume) data for multiple tickers from Yahoo Finance, engineers technical indicators commonly used in financial ML models, and loads both raw and derived data into a partitioned PostgreSQL database with full idempotency and run tracking.
+This pipeline extracts daily OHLCV (Open/High/Low/Close/Volume) data for multiple tickers from Yahoo Finance, engineers technical indicators commonly used in financial ML models, and loads both raw and derived data into a partitioned PostgreSQL database with full idempotency and run tracking. The pipeline is orchestrated end-to-end with Apache Airflow, running as a scheduled, dependency-aware DAG rather than a manually triggered script.
 
-**Current phase: Phase 1 — Foundation (Extract → Transform → Load)**
+**Current phase: Phase 2 — Orchestration (Apache Airflow)**
 
 Planned phases:
-- **Phase 2:** Apache Airflow orchestration, scheduled runs
 - **Phase 3:** FastAPI service layer for querying processed data
 - **Phase 4:** Streamlit dashboard, cloud deployment (AWS free tier / Railway)
 
 ## Architecture
 
-yfinance API
+```
+                              yfinance API
+                                   │
+                                   ▼
+                          ┌─────────────┐
+                          │  Extract    │
+                          │  (multi-    │
+                          │  ticker,    │
+                          │  retry      │
+                          │  logic)     │
+                          └──────┬──────┘
+                                 │
+                    ┌────────────┴────────────┐
+                    ▼                         ▼
+            ┌──────────────┐         ┌──────────────────┐
+            │  Load (raw)  │         │   Transform       │
+            │              │         │  (returns, SMA,   │
+            │              │         │  volatility, RSI, │
+            │              │         │  volume MA)       │
+            └──────┬───────┘         └─────────┬─────────┘
+                   │                            ▼
+                   │                   ┌──────────────────┐
+                   │                   │  Load (features)  │
+                   │                   └─────────┬─────────┘
+                   ▼                             ▼
+         market_data.ohlcv            market_data.ohlcv_features
+         (raw, immutable)              (engineered, FK to ohlcv)
+```
 
-│
+Orchestrated as an Airflow DAG (`market_data_pipeline`) with the following task dependency graph:
 
-▼
+```
+extract_task ──┬──> load_raw_task
+               └──> transform_task ──> load_features_task
+```
 
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────────┐
-
-│  Extract    │ ──▶ │   Transform      │ ──▶ │   Load               │
-
-│  (multi-    │     │  (returns, SMA,  │     │  (PostgreSQL,        │
-
-│  ticker,    │     │  volatility,     │     │  partitioned,        │
-
-│  retry      │     │  RSI, volume MA) │     │  idempotent upsert)  │
-
-│  logic)     │     │                  │     │                      │
-
-└─────────────┘     └──────────────────┘     └─────────────────────┘
-
-│
-
-┌─────────┴─────────┐
-
-▼                   ▼
-
-market_data.ohlcv   market_data.ohlcv_features
-
-(raw, immutable)     (engineered, FK to ohlcv)
+Each Airflow task is a thin wrapper around the existing, independently-tested `YFinanceExtractor`, `OHLCVTransformer`, and `PostgresLoader` classes. Airflow does not reimplement pipeline logic — it schedules, sequences, retries, and provides observability over logic that already has its own unit test coverage.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
+| Orchestration | Apache Airflow 2.9 |
 | Extraction | Python, yfinance |
 | Transformation | pandas, NumPy |
 | Storage | PostgreSQL 16 (partitioned by ticker) |
@@ -60,10 +68,12 @@ market_data.ohlcv   market_data.ohlcv_features
 
 - **Partitioned by ticker (`PARTITION BY LIST`)** — each ticker lives in its own physical partition for query performance and clean data management at scale.
 - **Raw/feature separation** — `ohlcv` (raw, immutable) and `ohlcv_features` (engineered) are separate tables linked by a foreign key. This mirrors feature-store architecture used in production ML systems: raw data is never mutated, and features can be recomputed or versioned independently.
-- **Idempotent loads** — uses `INSERT ... ON CONFLICT DO NOTHING` on a composite `(ticker, timestamp)` primary key. Re-running the pipeline never produces duplicate rows.
+- **Idempotent loads** — uses `INSERT ... ON CONFLICT DO NOTHING` on a composite `(ticker, timestamp)` primary key. Re-running the pipeline, whether manually or via a re-triggered Airflow run, never produces duplicate rows.
 - **Retry logic with backoff** — the extractor retries failed downloads (configurable attempts/delay), since external APIs and unreliable networks fail intermittently in practice.
 - **Partial-failure visibility** — if some tickers fail extraction, the pipeline still loads what succeeded and explicitly records the run as `partial_success` rather than silently reporting full success.
 - **Pipeline run tracking** — every execution (success, partial, or failed) is logged to a `pipeline_runs` table with row counts, duration, and error messages — a basic but real observability layer.
+- **Cross-task data handoff via Parquet, not XCom payloads** — each Airflow task writes its DataFrame output to a Parquet file and passes only the file path through XCom. Airflow's XCom backend is designed for small values, not multi-thousand-row datasets; this keeps the metadata database lightweight and mirrors how data handoff is handled in production orchestration.
+- **Isolated Airflow environment** — Airflow runs in its own virtual environment (`.venv-airflow`), separate from the project's main environment. This avoids a real dependency conflict: Airflow's supported SQLAlchemy version trails the project's SQLAlchemy 2.0.x, so the two cannot safely share a single dependency set.
 
 ## Features Engineered
 
@@ -77,41 +87,31 @@ market_data.ohlcv   market_data.ohlcv_features
 
 ## Project Structure
 
+```
 market-data-pipeline/
-
+├── airflow/
+│   └── dags/
+│       └── market_etl_dag.py       # DAG definition: extract -> transform -> load
 ├── config/
-
-│   └── settings.py            # Centralized Pydantic settings, reads .env
-
+│   └── settings.py                 # Centralized Pydantic settings, reads .env
 ├── etl/
-
 │   ├── extract/
-
-│   │   ├── base.py            # Abstract base extractor
-
+│   │   ├── base.py                 # Abstract base extractor
 │   │   └── yfinance_extractor.py
-
 │   ├── transform/
-
 │   │   └── ohlcv_transformer.py
-
 │   └── load/
-
 │       └── postgres_loader.py
-
 ├── db/
-
-│   └── init.sql                # Schema, partitions, indexes
-
+│   └── init.sql                    # Schema, partitions, indexes
 ├── tests/
-
 │   └── unit/
-
 │       └── test_transformer.py
-
 ├── docker-compose.yml
-
 └── .env.example
+```
+
+Note: `airflow/airflow.db`, `airflow/logs/`, and `.venv-airflow/` are generated locally by Airflow and are not tracked in version control — only the DAG definition itself is committed.
 
 ## Setup
 
@@ -119,7 +119,7 @@ market-data-pipeline/
 - Python 3.12+
 - Docker & Docker Compose
 
-### Installation
+### Installation (main pipeline)
 
 ```bash
 # Clone and enter the repo
@@ -141,11 +141,50 @@ cp .env.example .env
 docker compose up -d
 ```
 
-### Running the Pipeline
+### Installation (Airflow orchestration)
+
+Airflow runs in its own isolated virtual environment due to a dependency conflict between Airflow's required SQLAlchemy version and the main project's SQLAlchemy 2.0.x.
 
 ```bash
-# Run the full extract → transform → load pipeline
+python3 -m venv .venv-airflow
+source .venv-airflow/bin/activate
+
+AIRFLOW_VERSION=2.9.1
+PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "${CONSTRAINT_URL}"
+
+# Set AIRFLOW_HOME automatically on every activation of this venv
+echo 'export AIRFLOW_HOME='"$(pwd)"'/airflow' >> .venv-airflow/bin/activate
+source .venv-airflow/bin/activate  # re-source to pick up AIRFLOW_HOME
+
+airflow db init
+airflow users create --username admin --firstname <first> --lastname <last> --role Admin --email <email>
+```
+
+### Running the Pipeline
+
+**Manually (without Airflow):**
+```bash
+source .venv/bin/activate
 python -m etl.load.postgres_loader
+```
+
+**Via Airflow (orchestrated):**
+```bash
+source .venv-airflow/bin/activate
+
+# Terminal 1
+airflow webserver -p 8080
+
+# Terminal 2
+airflow scheduler
+```
+Then visit `http://localhost:8080`, log in, and trigger the `market_data_pipeline` DAG — or let it run on its `@daily` schedule.
+
+**Testing a full DAG run from the CLI (bypasses the scheduler, useful for debugging):**
+```bash
+airflow dags test market_data_pipeline <YYYY-MM-DD>
 ```
 
 ### Running Tests
@@ -158,6 +197,7 @@ pytest tests/unit/ -v
 ## Known Issues
 
 - **Stale proxy environment variables** can cause `yfinance` to fail instantly with a misleading "possibly delisted" error for every ticker. If extraction fails in under 1 second for all tickers, check `env | grep -i proxy` and run `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY`.
+- **Airflow/main dependency isolation** — Airflow task code currently runs inside `.venv-airflow`, which has the project's runtime dependencies (pandas, yfinance, psycopg2, etc.) installed alongside Airflow itself. This works but is not the intended long-term setup. A follow-up refactor to `ExternalPythonOperator`, executing task logic in the main project's `.venv` instead, is planned to properly separate the orchestrator's environment from the pipeline's runtime environment.
 
 ## Roadmap
 
@@ -165,7 +205,8 @@ pytest tests/unit/ -v
 - [x] Technical indicator feature engineering
 - [x] Partitioned PostgreSQL storage with idempotent loads
 - [x] Unit tests for transformation logic
-- [ ] Airflow DAG for scheduled orchestration
+- [x] Airflow DAG for scheduled orchestration
+- [ ] Task execution isolated to main project venv via `ExternalPythonOperator`
 - [ ] FastAPI endpoints for querying processed data
 - [ ] Integration tests for extract/load layers
 - [ ] Cloud deployment
