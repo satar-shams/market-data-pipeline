@@ -73,7 +73,8 @@ Each Airflow task is a thin wrapper around the existing, independently-tested `Y
 - **Partial-failure visibility** — if some tickers fail extraction, the pipeline still loads what succeeded and explicitly records the run as `partial_success` rather than silently reporting full success.
 - **Pipeline run tracking** — every execution (success, partial, or failed) is logged to a `pipeline_runs` table with row counts, duration, and error messages — a basic but real observability layer.
 - **Cross-task data handoff via Parquet, not XCom payloads** — each Airflow task writes its DataFrame output to a Parquet file and passes only the file path through XCom. Airflow's XCom backend is designed for small values, not multi-thousand-row datasets; this keeps the metadata database lightweight and mirrors how data handoff is handled in production orchestration.
-- **Isolated Airflow environment** — Airflow runs in its own virtual environment (`.venv-airflow`), separate from the project's main environment. This avoids a real dependency conflict: Airflow's supported SQLAlchemy version trails the project's SQLAlchemy 2.0.x, so the two cannot safely share a single dependency set.
+- **Isolated Airflow environment, isolated task execution** — Airflow itself runs in its own virtual environment (`.venv-airflow`), separate from the project's main environment (`.venv`). This avoids a real dependency conflict: Airflow's supported SQLAlchemy version trails the project's SQLAlchemy 2.0.x, so the two cannot safely share a single dependency set. Task *execution* goes a step further: every DAG task runs via `ExternalPythonOperator`, which spawns a subprocess using the project's own `.venv` interpreter rather than Airflow's. This means Airflow's environment never needs pandas, yfinance, or the project's SQLAlchemy version at all — it only needs its own dependencies. Task functions are fully self-contained (all imports inside the function body, project root added to `sys.path` explicitly) since the external subprocess shares no state with the DAG file's top-level scope.
+- **Full run auditing, including failures** — a final `record_run_task`, with `trigger_rule="all_done"`, always executes regardless of whether upstream tasks succeeded or failed. It inspects each task's final state and writes one row to `pipeline_runs` per DAG run — success, partial success, or failure, with an `error_message` describing which tasks failed. A run-tracking table that only logs successes isn't very useful for debugging.
 
 ## Features Engineered
 
@@ -197,7 +198,8 @@ pytest tests/unit/ -v
 ## Known Issues
 
 - **Stale proxy environment variables** can cause `yfinance` to fail instantly with a misleading "possibly delisted" error for every ticker. If extraction fails in under 1 second for all tickers, check `env | grep -i proxy` and run `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY`.
-- **Airflow/main dependency isolation** — Airflow task code currently runs inside `.venv-airflow`, which has the project's runtime dependencies (pandas, yfinance, psycopg2, etc.) installed alongside Airflow itself. This works but is not the intended long-term setup. A follow-up refactor to `ExternalPythonOperator`, executing task logic in the main project's `.venv` instead, is planned to properly separate the orchestrator's environment from the pipeline's runtime environment.
+- **`duration_sec` is only accurate for real (scheduled or UI-triggered) DAG runs.** It's calculated from `dag_run.start_date`, which for `airflow dags test <date>` CLI runs is anchored to the backdated logical/execution date (midnight), not the actual wall-clock time the test was run. This can produce inflated durations (hours instead of seconds) for CLI test runs specifically. Runs triggered through the scheduler or the web UI report accurate durations.
+- **No always-on infrastructure yet.** The scheduler only fires scheduled runs while its host machine is on — currently a local laptop, not an always-on server. Deploying to an always-on VM (or a managed Airflow service) is tracked under Phase 4 (cloud deployment) rather than solved here.
 
 ## Roadmap
 
@@ -206,7 +208,8 @@ pytest tests/unit/ -v
 - [x] Partitioned PostgreSQL storage with idempotent loads
 - [x] Unit tests for transformation logic
 - [x] Airflow DAG for scheduled orchestration
-- [ ] Task execution isolated to main project venv via `ExternalPythonOperator`
+- [x] Task execution isolated to main project venv via `ExternalPythonOperator`
+- [x] Full run auditing (`pipeline_runs`) wired into the DAG, including failure states
 - [ ] FastAPI endpoints for querying processed data
 - [ ] Integration tests for extract/load layers
 - [ ] Cloud deployment
