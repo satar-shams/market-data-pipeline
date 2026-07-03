@@ -4,13 +4,12 @@ A production-grade ETL pipeline for ingesting, transforming, and storing equity 
 
 ## Overview
 
-This pipeline extracts daily OHLCV (Open/High/Low/Close/Volume) data for multiple tickers from Yahoo Finance, engineers technical indicators commonly used in financial ML models, and loads both raw and derived data into a partitioned PostgreSQL database with full idempotency and run tracking. The pipeline is orchestrated end-to-end with Apache Airflow, running as a scheduled, dependency-aware DAG rather than a manually triggered script.
+This pipeline extracts daily OHLCV (Open/High/Low/Close/Volume) data for multiple tickers from Yahoo Finance, engineers technical indicators commonly used in financial ML models, loads both raw and derived data into a partitioned PostgreSQL database with full idempotency and run tracking, and exposes the processed data through a read-only REST API. The pipeline is orchestrated end-to-end with Apache Airflow, running as a scheduled, dependency-aware DAG rather than a manually triggered script.
 
-**Current phase: Phase 2 — Orchestration (Apache Airflow)**
+**Current phase: Phase 3 — Query Layer (FastAPI)**
 
 Planned phases:
-- **Phase 3:** FastAPI service layer for querying processed data
-- **Phase 4:** Streamlit dashboard, cloud deployment (AWS free tier / Railway)
+- **Phase 4:** Cloud deployment
 
 ## Architecture
 
@@ -56,6 +55,7 @@ Each Airflow task is a thin wrapper around the existing, independently-tested `Y
 
 | Layer | Technology |
 |---|---|
+| API | FastAPI |
 | Orchestration | Apache Airflow 2.9 |
 | Extraction | Python, yfinance |
 | Transformation | pandas, NumPy |
@@ -75,6 +75,8 @@ Each Airflow task is a thin wrapper around the existing, independently-tested `Y
 - **Cross-task data handoff via Parquet, not XCom payloads** — each Airflow task writes its DataFrame output to a Parquet file and passes only the file path through XCom. Airflow's XCom backend is designed for small values, not multi-thousand-row datasets; this keeps the metadata database lightweight and mirrors how data handoff is handled in production orchestration.
 - **Isolated Airflow environment, isolated task execution** — Airflow itself runs in its own virtual environment (`.venv-airflow`), separate from the project's main environment (`.venv`). This avoids a real dependency conflict: Airflow's supported SQLAlchemy version trails the project's SQLAlchemy 2.0.x, so the two cannot safely share a single dependency set. Task *execution* goes a step further: every DAG task runs via `ExternalPythonOperator`, which spawns a subprocess using the project's own `.venv` interpreter rather than Airflow's. This means Airflow's environment never needs pandas, yfinance, or the project's SQLAlchemy version at all — it only needs its own dependencies. Task functions are fully self-contained (all imports inside the function body, project root added to `sys.path` explicitly) since the external subprocess shares no state with the DAG file's top-level scope.
 - **Full run auditing, including failures** — a final `record_run_task`, with `trigger_rule="all_done"`, always executes regardless of whether upstream tasks succeeded or failed. It inspects each task's final state and writes one row to `pipeline_runs` per DAG run — success, partial success, or failure, with an `error_message` describing which tasks failed. A run-tracking table that only logs successes isn't very useful for debugging.
+- **Database-level read-only enforcement for the API** — the FastAPI service connects to Postgres as `api_reader`, a dedicated role with `SELECT`-only grants on `ohlcv`, `ohlcv_features`, and `pipeline_runs` (see `db/create_api_role.sql`). This is deliberately separate from the full-privilege user `PostgresLoader` uses for writes. The API's own code also defines no write endpoints and uses parameterized queries throughout — but the database-level restriction is the layer that holds even if application code has a bug, rather than relying on "the code only does SELECT" as the only line of defense.
+- **404 vs. empty list, treated as genuinely different states** — `GET /ohlcv/{ticker}` and `GET /features/{ticker}` return 404 if the ticker has never appeared in the database at all, but 200 with an empty `data` list if the ticker exists but no rows fall within a requested date range. These represent different situations for a client -- "this resource doesn't exist" is not the same as "this resource has no data matching your filter."
 
 ## Features Engineered
 
@@ -90,6 +92,15 @@ Each Airflow task is a thin wrapper around the existing, independently-tested `Y
 
 ```
 market-data-pipeline/
+├── api/
+│   ├── main.py                     # FastAPI app, mounts routers, health check
+│   ├── dependencies.py             # Read-only DB session dependency (api_reader role)
+│   ├── schemas/
+│   │   ├── market.py                # Pydantic models: tickers, ohlcv, features
+│   │   └── pipeline_runs.py         # Pydantic models: pipeline run audit records
+│   └── routers/
+│       ├── market.py                # /tickers, /ohlcv/{ticker}, /features/{ticker}
+│       └── pipeline_runs.py         # /pipeline-runs
 ├── airflow/
 │   └── dags/
 │       └── market_etl_dag.py       # DAG definition: extract -> transform -> load
@@ -104,15 +115,31 @@ market-data-pipeline/
 │   └── load/
 │       └── postgres_loader.py
 ├── db/
-│   └── init.sql                    # Schema, partitions, indexes
+│   ├── init.sql                    # Schema, partitions, indexes
+│   └── create_api_role.sql         # Read-only role for the API (api_reader)
 ├── tests/
 │   └── unit/
-│       └── test_transformer.py
+│       ├── test_transformer.py
+│       └── test_api.py             # API tests, DB session mocked via dependency_overrides
 ├── docker-compose.yml
 └── .env.example
 ```
 
 Note: `airflow/airflow.db`, `airflow/logs/`, and `.venv-airflow/` are generated locally by Airflow and are not tracked in version control — only the DAG definition itself is committed.
+
+## API Endpoints
+
+All endpoints are read-only (`GET` only — no write operations exist at any layer, see Key Design Decisions above).
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Liveness + DB connectivity check |
+| `GET /tickers` | List all distinct tickers in the database |
+| `GET /ohlcv/{ticker}` | Raw OHLCV data; supports `start_date`, `end_date`, `limit`, `offset` |
+| `GET /features/{ticker}` | Engineered features; same filtering/pagination as above |
+| `GET /pipeline-runs` | Recent pipeline run history from the audit table, including failures |
+
+Interactive documentation (Swagger UI) is available at `/docs` once the server is running.
 
 ## Setup
 
@@ -163,6 +190,22 @@ airflow db init
 airflow users create --username admin --firstname <first> --lastname <last> --role Admin --email <email>
 ```
 
+### Installation (API read-only role)
+
+The API connects as a dedicated Postgres role (`api_reader`) with `SELECT`-only privileges, kept separate from the full-privilege user the ETL pipeline uses for writes.
+
+```bash
+# Generate a strong password rather than using a guessable one, even locally
+python -c "import secrets; print(secrets.token_urlsafe(24))"
+
+# Fill that password into db/create_api_role.sql, then run it:
+docker cp db/create_api_role.sql market_postgres:/tmp/create_api_role.sql
+docker exec -it market_postgres psql -U <postgres_user> -d market_data -f /tmp/create_api_role.sql
+
+# Add the same password to .env:
+# API_DB_PASSWORD=<the password you generated>
+```
+
 ### Running the Pipeline
 
 **Manually (without Airflow):**
@@ -188,6 +231,19 @@ Then visit `http://localhost:8080`, log in, and trigger the `market_data_pipelin
 airflow dags test market_data_pipeline <YYYY-MM-DD>
 ```
 
+**Via the API (query processed data):**
+```bash
+source .venv/bin/activate
+uvicorn api.main:app --reload
+```
+Then visit `http://localhost:8000/docs` for interactive API documentation, or query directly:
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/tickers
+curl "http://localhost:8000/ohlcv/AAPL?start_date=2026-06-01&end_date=2026-06-30&limit=50"
+curl http://localhost:8000/pipeline-runs
+```
+
 ### Running Tests
 
 ```bash
@@ -210,7 +266,9 @@ pytest tests/unit/ -v
 - [x] Airflow DAG for scheduled orchestration
 - [x] Task execution isolated to main project venv via `ExternalPythonOperator`
 - [x] Full run auditing (`pipeline_runs`) wired into the DAG, including failure states
-- [ ] FastAPI endpoints for querying processed data
+- [x] FastAPI endpoints for querying processed data
+- [x] Read-only database role enforcing least-privilege access for the API
+- [x] API test coverage (mocked DB session, no live Postgres required)
 - [ ] Integration tests for extract/load layers
 - [ ] Cloud deployment
 
