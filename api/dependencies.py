@@ -14,7 +14,7 @@ from config.settings import settings
 # The ETL pipeline's PostgresLoader uses the full-privilege postgres_user
 # instead; the API should never share those write credentials.
 engine = create_engine(
-    settings.api_database_url,
+    settings.database_url,
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,
