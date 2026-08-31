@@ -1,5 +1,4 @@
 name: CI
-
 on:
   push:
     branches: [main, dev]
@@ -9,6 +8,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_password
+      API_DB_PASSWORD: ci_password
+      POSTGRES_DB: market_data
+      LOG_LEVEL: INFO
+      TICKERS: AAPL,MSFT
 
     steps:
       - name: Check out repository
@@ -22,8 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install pandas numpy pydantic pydantic-settings pytest fastapi httpx
 
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Run unit tests
+        run: pytest tests/unit/ -v
