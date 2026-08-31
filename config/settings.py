@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     postgres_user: str
     postgres_password: str
 
+    # ── Database (API read-only role) ───────────────────────────────────────
+    api_db_user: str = "api_reader"
+    api_db_password: str
+    
     # ── Pipeline ─────────────────────────────────────────────────────────────
     tickers: str = "AAPL,MSFT,GOOGL,AMZN,SPY"   # str, not List[str]
     lookback_days: int = 365
@@ -35,6 +39,13 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return (
             f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+    
+    @property
+    def api_database_url(self) -> str:
+        return (
+            f"postgresql+psycopg2://{self.api_db_user}:{self.api_db_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
