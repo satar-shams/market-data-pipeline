@@ -1,15 +1,11 @@
 -- db/create_api_role.sql
---
--- Creates a dedicated, read-only Postgres role for the FastAPI query layer.
--- See api/dependencies.py -- it connects via settings.api_database_url,
--- using this role, NOT the full-privilege postgres_user that PostgresLoader
--- uses for ETL writes.
+-- Run this manually after provisioning the database.
+-- Replace <API_READER_PASSWORD> with the actual password set in Render env vars.
 
-CREATE ROLE api_reader WITH LOGIN PASSWORD '5KeNyXML0xzaz8yEQPIraFwYK4EMVF5D';
+CREATE ROLE api_reader WITH LOGIN PASSWORD '<API_READER_PASSWORD>';
 
 GRANT CONNECT ON DATABASE market_data TO api_reader;
 GRANT USAGE ON SCHEMA market_data TO api_reader;
-
 GRANT SELECT ON market_data.ohlcv TO api_reader;
 GRANT SELECT ON market_data.ohlcv_features TO api_reader;
 GRANT SELECT ON market_data.pipeline_runs TO api_reader;
