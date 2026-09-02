@@ -2,11 +2,27 @@
 
 A production-grade ETL pipeline for ingesting, transforming, and storing equity market data — built as a portfolio project demonstrating data engineering and ML-readiness practices.
 
+
 ## Overview
 
 This pipeline extracts daily OHLCV (Open/High/Low/Close/Volume) data for multiple tickers from Yahoo Finance, engineers technical indicators commonly used in financial ML models, loads both raw and derived data into a partitioned PostgreSQL database with full idempotency and run tracking, and exposes the processed data through a read-only REST API. The pipeline is orchestrated end-to-end with Apache Airflow, running as a scheduled, dependency-aware DAG rather than a manually triggered script.
 
 **Status: Live and deployed** — [https://market-data-pipeline-c3ut.onrender.com](https://market-data-pipeline-c3ut.onrender.com)
+
+- ## Live Demo
+
+The API is deployed and queryable at **https://market-data-pipeline-c3ut.onrender.com**
+
+| Link                                                                                           | Description                |
+| ---------------------------------------------------------------------------------------------- | -------------------------- |
+| [/docs](https://market-data-pipeline-c3ut.onrender.com/docs)                                   | Interactive Swagger UI     |
+| [/health](https://market-data-pipeline-c3ut.onrender.com/health)                               | API + DB health check      |
+| [/tickers](https://market-data-pipeline-c3ut.onrender.com/tickers)                             | Available tickers          |
+| [/ohlcv/AAPL?limit=5](https://market-data-pipeline-c3ut.onrender.com/ohlcv/AAPL?limit=5)       | Sample OHLCV data          |
+| [/features/AAPL?limit=5](https://market-data-pipeline-c3ut.onrender.com/features/AAPL?limit=5) | Sample engineered features |
+| [/pipeline-runs](https://market-data-pipeline-c3ut.onrender.com/pipeline-runs)                 | Pipeline run history       |
+
+> **Note:** Render's free tier spins down inactive services after 15 minutes. The first request after inactivity may take 30–60 seconds to wake up.
 
 ## Architecture
 
@@ -253,20 +269,6 @@ pytest tests/unit/ -v
 - **Stale proxy environment variables** can cause `yfinance` to fail instantly with a misleading "possibly delisted" error for every ticker. If extraction fails in under 1 second for all tickers, check `env | grep -i proxy` and run `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY`.
 - **`duration_sec` is only accurate for real (scheduled or UI-triggered) DAG runs.** It's calculated from `dag_run.start_date`, which for `airflow dags test <date>` CLI runs is anchored to the backdated logical/execution date (midnight), not the actual wall-clock time the test was run. This can produce inflated durations (hours instead of seconds) for CLI test runs specifically. Runs triggered through the scheduler or the web UI report accurate durations.
 - **Airflow runs locally, not on always-on infrastructure.** The scheduler only fires scheduled runs while the host machine is on. The FastAPI query layer and PostgreSQL database are deployed to Render and always available — only the ETL ingestion step requires a local machine to run.
-- ## Live Demo
-
-The API is deployed and queryable at **https://market-data-pipeline-c3ut.onrender.com**
-
-| Link                                                                                           | Description                |
-| ---------------------------------------------------------------------------------------------- | -------------------------- |
-| [/docs](https://market-data-pipeline-c3ut.onrender.com/docs)                                   | Interactive Swagger UI     |
-| [/health](https://market-data-pipeline-c3ut.onrender.com/health)                               | API + DB health check      |
-| [/tickers](https://market-data-pipeline-c3ut.onrender.com/tickers)                             | Available tickers          |
-| [/ohlcv/AAPL?limit=5](https://market-data-pipeline-c3ut.onrender.com/ohlcv/AAPL?limit=5)       | Sample OHLCV data          |
-| [/features/AAPL?limit=5](https://market-data-pipeline-c3ut.onrender.com/features/AAPL?limit=5) | Sample engineered features |
-| [/pipeline-runs](https://market-data-pipeline-c3ut.onrender.com/pipeline-runs)                 | Pipeline run history       |
-
-> **Note:** Render's free tier spins down inactive services after 15 minutes. The first request after inactivity may take 30–60 seconds to wake up.
 
 ## Roadmap
 
