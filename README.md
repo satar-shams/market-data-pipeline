@@ -7,53 +7,18 @@ A production-grade ETL pipeline for ingesting, transforming, and storing equity 
 
 This pipeline extracts daily OHLCV (Open/High/Low/Close/Volume) data for multiple tickers from Yahoo Finance, engineers technical indicators commonly used in financial ML models, loads both raw and derived data into a partitioned PostgreSQL database with full idempotency and run tracking, and exposes the processed data through a read-only REST API. The pipeline is orchestrated end-to-end with Apache Airflow, running as a scheduled, dependency-aware DAG rather than a manually triggered script.
 
-**Status: Live and deployed** — [https://market-data-pipeline-c3ut.onrender.com](https://market-data-pipeline-c3ut.onrender.com)
+**Status:** Complete. Runs locally via Docker (PostgreSQL) and a local Airflow scheduler. A previous Render free-tier deployment of the API has expired.
 
-- ## Live Demo
+## Demo
 
-The API is deployed and queryable at **https://market-data-pipeline-c3ut.onrender.com**
+The API was previously deployed on Render's free tier, but that deployment has expired. You can run the API locally and explore its interactive Swagger documentation at `http://localhost:8000/docs`.
 
-| Link                                                                                           | Description                |
-| ---------------------------------------------------------------------------------------------- | -------------------------- |
-| [/docs](https://market-data-pipeline-c3ut.onrender.com/docs)                                   | Interactive Swagger UI     |
-| [/health](https://market-data-pipeline-c3ut.onrender.com/health)                               | API + DB health check      |
-| [/tickers](https://market-data-pipeline-c3ut.onrender.com/tickers)                             | Available tickers          |
-| [/ohlcv/AAPL?limit=5](https://market-data-pipeline-c3ut.onrender.com/ohlcv/AAPL?limit=5)       | Sample OHLCV data          |
-| [/features/AAPL?limit=5](https://market-data-pipeline-c3ut.onrender.com/features/AAPL?limit=5) | Sample engineered features |
-| [/pipeline-runs](https://market-data-pipeline-c3ut.onrender.com/pipeline-runs)                 | Pipeline run history       |
-
-> **Note:** Render's free tier spins down inactive services after 15 minutes. The first request after inactivity may take 30–60 seconds to wake up.
+For a visual overview of the system, see the architecture diagram below.
 
 ## Architecture
 
-```
-                              yfinance API
-                                   │
-                                   ▼
-                          ┌─────────────┐
-                          │  Extract    │
-                          │  (multi-    │
-                          │  ticker,    │
-                          │  retry      │
-                          │  logic)     │
-                          └──────┬──────┘
-                                 │
-                    ┌────────────┴────────────┐
-                    ▼                         ▼
-            ┌──────────────┐         ┌──────────────────┐
-            │  Load (raw)  │         │   Transform       │
-            │              │         │  (returns, SMA,   │
-            │              │         │  volatility, RSI, │
-            │              │         │  volume MA)       │
-            └──────┬───────┘         └─────────┬─────────┘
-                   │                            ▼
-                   │                   ┌──────────────────┐
-                   │                   │  Load (features)  │
-                   │                   └─────────┬─────────┘
-                   ▼                             ▼
-         market_data.ohlcv            market_data.ohlcv_features
-         (raw, immutable)              (engineered, FK to ohlcv)
-```
+
+![Market Data Pipeline architecture](docs/architecture.png)
 
 Orchestrated as an Airflow DAG (`market_data_pipeline`) with the following task dependency graph:
 
@@ -268,7 +233,7 @@ pytest tests/unit/ -v
 
 - **Stale proxy environment variables** can cause `yfinance` to fail instantly with a misleading "possibly delisted" error for every ticker. If extraction fails in under 1 second for all tickers, check `env | grep -i proxy` and run `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY`.
 - **`duration_sec` is only accurate for real (scheduled or UI-triggered) DAG runs.** It's calculated from `dag_run.start_date`, which for `airflow dags test <date>` CLI runs is anchored to the backdated logical/execution date (midnight), not the actual wall-clock time the test was run. This can produce inflated durations (hours instead of seconds) for CLI test runs specifically. Runs triggered through the scheduler or the web UI report accurate durations.
-- **Airflow runs locally, not on always-on infrastructure.** The scheduler only fires scheduled runs while the host machine is on. The FastAPI query layer and PostgreSQL database are deployed to Render and always available — only the ETL ingestion step requires a local machine to run.
+- **Airflow runs locally, not on always-on infrastructure.** The scheduler only fires scheduled runs while the host machine is on. Scheduled ingestion therefore stops when the host machine is off.
 
 ## Roadmap
 
@@ -283,7 +248,7 @@ pytest tests/unit/ -v
 - [x] Read-only database role enforcing least-privilege access for the API
 - [x] API test coverage (mocked DB session, no live Postgres required)
 - [ ] Integration tests for extract/load layers
-- [x] Cloud deployment (Render — PostgreSQL + FastAPI web service)
+- [x] Previous Render free-tier deployment of PostgreSQL and FastAPI (since expired)
 
 ## Author
 
